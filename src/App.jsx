@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 const BINANCE_WS = "wss://stream.binance.com:9443/ws/btcusdt@kline_1m";
-const BINANCE_REST = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=30";
-const FUNDING_URL = "https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=1";
-const TICKER_URL = "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT";
+const BINANCE_REST = "/api/klines";
+const FUNDING_URL = "/api/funding";
+const TICKER_URL = "/api/ticker";
 
 // Bollinger Band calculation
 function calcBollinger(closes, period = 20, mult = 2) {
@@ -87,6 +87,7 @@ export default function AlertDashboard() {
   const alertIdRef = useRef(0);
   const lastAlertTimeRef = useRef({});
   const candlesRef = useRef([]);
+  const wsFailCountRef = useRef(0);
 
   // Cooldown check — don't repeat same alert type within 60s
   const canAlert = useCallback((type) => {
@@ -176,25 +177,33 @@ export default function AlertDashboard() {
       ws.onopen = () => {
         if (destroyed) return;
         retryDelay = 3000;
+        wsFailCountRef.current = 0;
         setConnected(true);
       };
       ws.onclose = () => {
         if (destroyed) return;
+        wsFailCountRef.current += 1;
         setConnected(false);
-        reconnectTimer = setTimeout(() => {
-          retryDelay = Math.min(retryDelay * 2, 30000);
-          connect();
-        }, retryDelay);
+        // After 3 consecutive failures stop retrying WebSocket — polling takes over
+        if (wsFailCountRef.current <= 3) {
+          reconnectTimer = setTimeout(() => {
+            retryDelay = Math.min(retryDelay * 2, 30000);
+            connect();
+          }, retryDelay);
+        }
       };
       ws.onerror = () => {
         if (destroyed) return;
         ws.onclose = null;
         ws.close();
+        wsFailCountRef.current += 1;
         setConnected(false);
-        reconnectTimer = setTimeout(() => {
-          retryDelay = Math.min(retryDelay * 2, 30000);
-          connect();
-        }, retryDelay);
+        if (wsFailCountRef.current <= 3) {
+          reconnectTimer = setTimeout(() => {
+            retryDelay = Math.min(retryDelay * 2, 30000);
+            connect();
+          }, retryDelay);
+        }
       };
 
       ws.onmessage = (event) => {
@@ -237,6 +246,33 @@ export default function AlertDashboard() {
         wsRef.current.close();
       }
     };
+  }, []);
+
+  // Polling fallback — kicks in when WebSocket fails 3+ times
+  useEffect(() => {
+    const poll = () => {
+      if (wsFailCountRef.current < 3) return;
+      fetch(BINANCE_REST)
+        .then((r) => r.json())
+        .then((data) => {
+          if (!Array.isArray(data)) return;
+          const parsed = data.map((k) => ({
+            time: k[0],
+            open: parseFloat(k[1]),
+            high: parseFloat(k[2]),
+            low: parseFloat(k[3]),
+            close: parseFloat(k[4]),
+            volume: parseFloat(k[5]),
+          }));
+          setPrice(parsed[parsed.length - 1].close);
+          setCandles(parsed);
+          candlesRef.current = parsed;
+          setConnected(true);
+        })
+        .catch(() => setConnected(false));
+    };
+    const iv = setInterval(poll, 5000);
+    return () => clearInterval(iv);
   }, []);
 
   // Analysis engine — runs every 2 seconds
