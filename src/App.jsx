@@ -166,18 +166,39 @@ export default function AlertDashboard() {
   // WebSocket for live candles
   useEffect(() => {
     let reconnectTimer;
+    let destroyed = false;
+    let retryDelay = 3000;
+
     const connect = () => {
       const ws = new WebSocket(BINANCE_WS);
       wsRef.current = ws;
 
-      ws.onopen = () => setConnected(true);
-      ws.onclose = () => {
-        setConnected(false);
-        reconnectTimer = setTimeout(connect, 3000);
+      ws.onopen = () => {
+        if (destroyed) return;
+        retryDelay = 3000;
+        setConnected(true);
       };
-      ws.onerror = () => ws.close();
+      ws.onclose = () => {
+        if (destroyed) return;
+        setConnected(false);
+        reconnectTimer = setTimeout(() => {
+          retryDelay = Math.min(retryDelay * 2, 30000);
+          connect();
+        }, retryDelay);
+      };
+      ws.onerror = () => {
+        if (destroyed) return;
+        ws.onclose = null;
+        ws.close();
+        setConnected(false);
+        reconnectTimer = setTimeout(() => {
+          retryDelay = Math.min(retryDelay * 2, 30000);
+          connect();
+        }, retryDelay);
+      };
 
       ws.onmessage = (event) => {
+        if (destroyed) return;
         const msg = JSON.parse(event.data);
         const k = msg.k;
         if (!k) return;
@@ -208,8 +229,13 @@ export default function AlertDashboard() {
 
     connect();
     return () => {
-      if (wsRef.current) wsRef.current.close();
+      destroyed = true;
       clearTimeout(reconnectTimer);
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.onerror = null;
+        wsRef.current.close();
+      }
     };
   }, []);
 
